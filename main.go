@@ -8,7 +8,6 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"image/png"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +26,16 @@ type WatermarkConfig struct {
 	FontSize int
 	Color    string
 	Position string
+	Verbose  bool
+}
+
+// ProcessingStats 处理统计信息
+type ProcessingStats struct {
+	TotalFiles     int
+	ProcessedFiles int
+	SuccessFiles   int
+	FailedFiles    int
+	StartTime      time.Time
 }
 
 // Position 位置枚举
@@ -48,6 +57,58 @@ var positionMap = map[string]Position{
 	"center":      Center,
 }
 
+// 全局统计信息
+var stats ProcessingStats
+
+// 日志函数
+func logInfo(format string, args ...interface{}) {
+	fmt.Printf("[INFO] "+format+"\n", args...)
+}
+
+func logVerbose(config *WatermarkConfig, format string, args ...interface{}) {
+	if config.Verbose {
+		fmt.Printf("[VERBOSE] "+format+"\n", args...)
+	}
+}
+
+func logWarning(format string, args ...interface{}) {
+	fmt.Printf("[WARNING] "+format+"\n", args...)
+}
+
+func logError(format string, args ...interface{}) {
+	fmt.Printf("[ERROR] "+format+"\n", args...)
+}
+
+func logSuccess(format string, args ...interface{}) {
+	fmt.Printf("[SUCCESS] "+format+"\n", args...)
+}
+
+func logProgress(config *WatermarkConfig, current, total int, filename string) {
+	if config.Verbose {
+		percentage := float64(current) / float64(total) * 100
+		fmt.Printf("\r[PROGRESS] 处理进度: %d/%d (%.1f%%) - %s", current, total, percentage, filename)
+		if current == total {
+			fmt.Println() // 换行
+		}
+	}
+}
+
+func printStats() {
+	duration := time.Since(stats.StartTime)
+	fmt.Printf("\n" + strings.Repeat("=", 50) + "\n")
+	fmt.Printf("处理完成统计:\n")
+	fmt.Printf("  总文件数: %d\n", stats.TotalFiles)
+	fmt.Printf("  已处理: %d\n", stats.ProcessedFiles)
+	fmt.Printf("  成功: %d\n", stats.SuccessFiles)
+	fmt.Printf("  失败: %d\n", stats.FailedFiles)
+	fmt.Printf("  耗时: %v\n", duration.Round(time.Millisecond))
+	if stats.ProcessedFiles > 0 {
+		avgTime := duration / time.Duration(stats.ProcessedFiles)
+		fmt.Printf("  平均处理时间: %v/文件\n", avgTime.Round(time.Millisecond))
+	}
+	fmt.Printf(strings.Repeat("=", 50) + "\n")
+}
+
 func main() {
 	// 命令行参数
 	var (
@@ -55,12 +116,18 @@ func main() {
 		fontSize  = flag.Int("size", 24, "字体大小")
 		color     = flag.String("color", "white", "水印颜色 (white, black, red, blue, green)")
 		position  = flag.String("position", "bottomright", "水印位置 (topleft, topright, bottomleft, bottomright, center)")
+		verbose   = flag.Bool("verbose", false, "显示详细日志信息")
 	)
 	flag.Parse()
 
+	// 初始化统计信息
+	stats = ProcessingStats{
+		StartTime: time.Now(),
+	}
+
 	if *inputPath == "" {
-		fmt.Println("使用方法: watermark -input <图片路径> [-size <字体大小>] [-color <颜色>] [-position <位置>]")
-		fmt.Println("示例: watermark -input ./photos/image.jpg -size 32 -color white -position bottomright")
+		fmt.Println("使用方法: watermark -input <图片路径> [-size <字体大小>] [-color <颜色>] [-position <位置>] [-verbose]")
+		fmt.Println("示例: watermark -input ./photos/image.jpg -size 32 -color white -position bottomright -verbose")
 		os.Exit(1)
 	}
 
@@ -68,19 +135,29 @@ func main() {
 		FontSize: *fontSize,
 		Color:    *color,
 		Position: *position,
+		Verbose:  *verbose,
 	}
 
 	// 检查输入路径
 	if _, err := os.Stat(*inputPath); os.IsNotExist(err) {
-		log.Fatalf("输入文件不存在: %s", *inputPath)
+		logError("输入文件不存在: %s", *inputPath)
+		os.Exit(1)
 	}
+
+	logInfo("开始处理图片水印...")
+	logInfo("输入路径: %s", *inputPath)
+	logVerbose(config, "配置参数 - 字体大小: %d, 颜色: %s, 位置: %s", *fontSize, *color, *position)
 
 	// 处理单个文件或目录
 	if isDir(*inputPath) {
 		processDirectory(*inputPath, config)
 	} else {
+		stats.TotalFiles = 1
 		processFile(*inputPath, config)
 	}
+
+	// 打印统计信息
+	printStats()
 }
 
 // isDir 检查路径是否为目录
@@ -94,15 +171,41 @@ func isDir(path string) bool {
 
 // processDirectory 处理目录中的所有图片
 func processDirectory(dirPath string, config *WatermarkConfig) {
+	logInfo("开始处理目录: %s", dirPath)
+
 	// 创建输出目录
 	outputDir := dirPath + "_watermark"
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		log.Fatalf("创建输出目录失败: %v", err)
+		logError("创建输出目录失败: %v", err)
+		os.Exit(1)
+	}
+	logInfo("输出目录: %s", outputDir)
+
+	// 先统计图片文件数量
+	imageCount := 0
+	filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && isImageFile(path) {
+			imageCount++
+		}
+		return nil
+	})
+
+	stats.TotalFiles = imageCount
+	logInfo("发现 %d 个图片文件", imageCount)
+
+	if imageCount == 0 {
+		logWarning("目录中没有找到支持的图片文件")
+		return
 	}
 
 	// 遍历目录中的文件
+	currentFile := 0
 	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			logError("访问文件失败 %s: %v", path, err)
 			return err
 		}
 
@@ -113,6 +216,8 @@ func processDirectory(dirPath string, config *WatermarkConfig) {
 
 		// 检查是否为支持的图片格式
 		if isImageFile(path) {
+			currentFile++
+			logProgress(config, currentFile, imageCount, filepath.Base(path))
 			processFile(path, config)
 		}
 
@@ -120,20 +225,23 @@ func processDirectory(dirPath string, config *WatermarkConfig) {
 	})
 
 	if err != nil {
-		log.Fatalf("遍历目录失败: %v", err)
+		logError("遍历目录失败: %v", err)
+		os.Exit(1)
 	}
 
-	fmt.Printf("处理完成！输出目录: %s\n", outputDir)
+	logSuccess("目录处理完成！输出目录: %s", outputDir)
 }
 
 // processFile 处理单个图片文件
 func processFile(inputPath string, config *WatermarkConfig) {
-	fmt.Printf("处理文件: %s\n", inputPath)
+	stats.ProcessedFiles++
+	logVerbose(config, "开始处理文件: %s", filepath.Base(inputPath))
 
 	// 读取图片
 	img, err := imaging.Open(inputPath)
 	if err != nil {
-		log.Printf("读取图片失败 %s: %v", inputPath, err)
+		logError("读取图片失败 %s: %v", inputPath, err)
+		stats.FailedFiles++
 		return
 	}
 
@@ -141,7 +249,9 @@ func processFile(inputPath string, config *WatermarkConfig) {
 	watermarkText := getExifDate(inputPath)
 	if watermarkText == "" {
 		watermarkText = time.Now().Format("2006-01-02")
-		fmt.Printf("未找到EXIF日期信息，使用当前日期: %s\n", watermarkText)
+		logWarning("未找到EXIF日期信息，使用当前日期: %s", watermarkText)
+	} else {
+		logVerbose(config, "从EXIF获取日期: %s", watermarkText)
 	}
 
 	// 添加水印
@@ -150,17 +260,20 @@ func processFile(inputPath string, config *WatermarkConfig) {
 	// 生成输出路径
 	outputPath := generateOutputPath(inputPath)
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
-		log.Printf("创建输出目录失败: %v", err)
+		logError("创建输出目录失败: %v", err)
+		stats.FailedFiles++
 		return
 	}
 
 	// 保存图片
 	if err := saveImage(watermarkedImg, outputPath); err != nil {
-		log.Printf("保存图片失败 %s: %v", outputPath, err)
+		logError("保存图片失败 %s: %v", outputPath, err)
+		stats.FailedFiles++
 		return
 	}
 
-	fmt.Printf("已保存: %s\n", outputPath)
+	stats.SuccessFiles++
+	logVerbose(config, "成功保存: %s", filepath.Base(outputPath))
 }
 
 // getExifDate 从EXIF信息中获取拍摄日期
