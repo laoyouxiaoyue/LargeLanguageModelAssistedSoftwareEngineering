@@ -1,0 +1,45 @@
+Watermark Tool - Version Information
+===================================
+
+Version: v1.0.0
+Release Date: September 28, 2025
+Supported Platform: Windows 10/11
+File Size: ~15MB
+
+Update Content:
+✅ Initial version release
+✅ Cross-platform watermark processing
+✅ Real-time preview functionality
+✅ Template management system
+✅ Batch processing functionality
+✅ Advanced color picker
+✅ Multiple watermark position options
+✅ Support for JPEG, PNG formats
+✅ English interface optimization
+
+Technical Specifications:
+- Development Language: Go 1.21+
+- GUI Framework: Fyne v2.4.3
+- Image Processing: imaging library
+- Font Rendering: golang.org/x/image
+- Cross-platform Support: Windows/macOS
+
+File List:
+- watermark-app.exe: Main program file
+- run.bat: Startup script
+- README.txt: Detailed usage instructions
+- VERSION.txt: This file
+
+System Requirements:
+- Operating System: Windows 10 or higher
+- Memory: At least 512MB available memory
+- Disk Space: At least 50MB available space
+- Display: 1024x768 or higher resolution
+
+Installation Instructions:
+1. Extract to any directory
+2. Double-click "run.bat" to run
+3. No installation required, ready to use
+
+Uninstallation Instructions:
+Simply delete the entire folder to completely uninstall
