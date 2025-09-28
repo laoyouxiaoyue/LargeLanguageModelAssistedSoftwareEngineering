@@ -1,440 +1,442 @@
 package main
 
 import (
-	"flag"
-	"fmt"
-	"image"
+	"errors"
 	"image/color"
-	"image/draw"
 	"image/jpeg"
 	"image/png"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"time"
+	"syscall"
 
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/widget"
 	"github.com/disintegration/imaging"
-	"github.com/rwcarlsen/goexif/exif"
-	"github.com/rwcarlsen/goexif/mknote"
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/basicfont"
-	"golang.org/x/image/math/fixed"
 )
 
-// WatermarkConfig 水印配置
+// WatermarkConfig holds all watermark configuration
 type WatermarkConfig struct {
-	FontSize int
-	Color    string
-	Position string
-	Verbose  bool
+	Text      string
+	FontSize  int
+	Color     color.RGBA
+	Opacity   int
+	Position  string
+	X         int
+	Y         int
+	Rotation  float64
+	ImagePath string
+	IsImage   bool
 }
 
-// ProcessingStats 处理统计信息
-type ProcessingStats struct {
-	TotalFiles     int
-	ProcessedFiles int
-	SuccessFiles   int
-	FailedFiles    int
-	StartTime      time.Time
+// AppData holds the main application state
+type AppData struct {
+	Images        []string
+	CurrentImage  int
+	Watermark     WatermarkConfig
+	OutputFolder  string
+	OutputFormat  string
+	OutputQuality int
+	Prefix        string
+	Suffix        string
 }
 
-// Position 位置枚举
-type Position int
-
-const (
-	TopLeft Position = iota
-	TopRight
-	BottomLeft
-	BottomRight
-	Center
-)
-
-var positionMap = map[string]Position{
-	"topleft":     TopLeft,
-	"topright":    TopRight,
-	"bottomleft":  BottomLeft,
-	"bottomright": BottomRight,
-	"center":      Center,
+var appData = &AppData{
+	Watermark: WatermarkConfig{
+		Text:     "WATERMARK",
+		FontSize: 52, // Much larger default font size (4x scale)
+		Color:    color.RGBA{R: 255, G: 255, B: 255, A: 255},
+		Opacity:  80,
+		Position: "bottom-right",
+		X:        10,
+		Y:        10,
+		Rotation: 0,
+		IsImage:  false,
+	},
+	OutputFormat:  "JPEG",
+	OutputQuality: 90,
+	Prefix:        "wm_",
+	Suffix:        "",
 }
 
-// 全局统计信息
-var stats ProcessingStats
+// setWindowsUTF8 sets Windows console to UTF-8 mode
+func setWindowsUTF8() {
+	if runtime.GOOS == "windows" {
+		kernel32 := syscall.NewLazyDLL("kernel32.dll")
+		setConsoleCP := kernel32.NewProc("SetConsoleCP")
+		setConsoleOutputCP := kernel32.NewProc("SetConsoleOutputCP")
 
-// 日志函数
-func logInfo(format string, args ...interface{}) {
-	fmt.Printf("[INFO] "+format+"\n", args...)
-}
-
-func logVerbose(config *WatermarkConfig, format string, args ...interface{}) {
-	if config.Verbose {
-		fmt.Printf("[VERBOSE] "+format+"\n", args...)
+		// Set console code page to UTF-8 (65001)
+		setConsoleCP.Call(uintptr(65001))
+		setConsoleOutputCP.Call(uintptr(65001))
 	}
-}
-
-func logWarning(format string, args ...interface{}) {
-	fmt.Printf("[WARNING] "+format+"\n", args...)
-}
-
-func logError(format string, args ...interface{}) {
-	fmt.Printf("[ERROR] "+format+"\n", args...)
-}
-
-func logSuccess(format string, args ...interface{}) {
-	fmt.Printf("[SUCCESS] "+format+"\n", args...)
-}
-
-func logProgress(config *WatermarkConfig, current, total int, filename string) {
-	if config.Verbose {
-		percentage := float64(current) / float64(total) * 100
-		fmt.Printf("\r[PROGRESS] 处理进度: %d/%d (%.1f%%) - %s", current, total, percentage, filename)
-		if current == total {
-			fmt.Println() // 换行
-		}
-	}
-}
-
-func printStats() {
-	duration := time.Since(stats.StartTime)
-	fmt.Printf("\n" + strings.Repeat("=", 50) + "\n")
-	fmt.Printf("处理完成统计:\n")
-	fmt.Printf("  总文件数: %d\n", stats.TotalFiles)
-	fmt.Printf("  已处理: %d\n", stats.ProcessedFiles)
-	fmt.Printf("  成功: %d\n", stats.SuccessFiles)
-	fmt.Printf("  失败: %d\n", stats.FailedFiles)
-	fmt.Printf("  耗时: %v\n", duration.Round(time.Millisecond))
-	if stats.ProcessedFiles > 0 {
-		avgTime := duration / time.Duration(stats.ProcessedFiles)
-		fmt.Printf("  平均处理时间: %v/文件\n", avgTime.Round(time.Millisecond))
-	}
-	fmt.Printf(strings.Repeat("=", 50) + "\n")
 }
 
 func main() {
-	// 命令行参数
-	var (
-		inputPath = flag.String("input", "", "输入图片文件路径")
-		fontSize  = flag.Int("size", 24, "字体大小")
-		color     = flag.String("color", "white", "水印颜色 (white, black, red, blue, green)")
-		position  = flag.String("position", "bottomright", "水印位置 (topleft, topright, bottomleft, bottomright, center)")
-		verbose   = flag.Bool("verbose", false, "显示详细日志信息")
+	// Set UTF-8 encoding for Windows
+	setWindowsUTF8()
+
+	myApp := app.NewWithID("com.watermark.app")
+
+	myWindow := myApp.NewWindow("Watermark Tool")
+	myWindow.Resize(fyne.NewSize(800, 500)) // Smaller initial size
+	myWindow.CenterOnScreen()
+	// Allow window to be resized by user
+
+	// Create main UI
+	content := createMainUI(myWindow)
+	myWindow.SetContent(content)
+
+	myWindow.ShowAndRun()
+}
+
+func createMainUI(window fyne.Window) *container.Split {
+	// Left panel - Image list
+	imageList := widget.NewList(
+		func() int {
+			return len(appData.Images)
+		},
+		func() fyne.CanvasObject {
+			return container.NewHBox(
+				widget.NewIcon(nil),
+				widget.NewLabel(""),
+			)
+		},
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			container := obj.(*fyne.Container)
+			label := container.Objects[1].(*widget.Label)
+			if id < len(appData.Images) {
+				label.SetText(filepath.Base(appData.Images[id]))
+			}
+		},
 	)
-	flag.Parse()
 
-	// 初始化统计信息
-	stats = ProcessingStats{
-		StartTime: time.Now(),
+	imageList.OnSelected = func(id widget.ListItemID) {
+		appData.CurrentImage = id
+		updatePreview()
 	}
 
-	if *inputPath == "" {
-		fmt.Println("使用方法: watermark -input <图片路径> [-size <字体大小>] [-color <颜色>] [-position <位置>] [-verbose]")
-		fmt.Println("示例: watermark -input ./photos/image.jpg -size 32 -color white -position bottomright -verbose")
-		os.Exit(1)
-	}
-
-	config := &WatermarkConfig{
-		FontSize: *fontSize,
-		Color:    *color,
-		Position: *position,
-		Verbose:  *verbose,
-	}
-
-	// 检查输入路径
-	if _, err := os.Stat(*inputPath); os.IsNotExist(err) {
-		logError("输入文件不存在: %s", *inputPath)
-		os.Exit(1)
-	}
-
-	logInfo("开始处理图片水印...")
-	logInfo("输入路径: %s", *inputPath)
-	logVerbose(config, "配置参数 - 字体大小: %d, 颜色: %s, 位置: %s", *fontSize, *color, *position)
-
-	// 处理单个文件或目录
-	if isDir(*inputPath) {
-		processDirectory(*inputPath, config)
-	} else {
-		stats.TotalFiles = 1
-		processFile(*inputPath, config)
-	}
-
-	// 打印统计信息
-	printStats()
-}
-
-// isDir 检查路径是否为目录
-func isDir(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	return info.IsDir()
-}
-
-// processDirectory 处理目录中的所有图片
-func processDirectory(dirPath string, config *WatermarkConfig) {
-	logInfo("开始处理目录: %s", dirPath)
-
-	// 创建输出目录
-	outputDir := dirPath + "_watermark"
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		logError("创建输出目录失败: %v", err)
-		os.Exit(1)
-	}
-	logInfo("输出目录: %s", outputDir)
-
-	// 先统计图片文件数量
-	imageCount := 0
-	filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() && isImageFile(path) {
-			imageCount++
-		}
-		return nil
+	// Import buttons
+	importSingleBtn := widget.NewButton("Import Single Image", func() {
+		importSingleImage(window)
+	})
+	importFolderBtn := widget.NewButton("Import Folder", func() {
+		importFolder(window)
 	})
 
-	stats.TotalFiles = imageCount
-	logInfo("发现 %d 个图片文件", imageCount)
+	leftPanel := container.NewVBox(
+		widget.NewLabel("Image List"),
+		importSingleBtn,
+		importFolderBtn,
+		widget.NewSeparator(),
+		imageList,
+	)
 
-	if imageCount == 0 {
-		logWarning("目录中没有找到支持的图片文件")
-		return
+	// Center panel - Preview
+	previewWidget := NewPreviewWidget()
+	globalPreviewWidget = previewWidget // Set global reference
+	previewContainer := container.NewScroll(previewWidget.container)
+
+	// Right panel - Enhanced Controls
+	enhancedControls := NewEnhancedControls(window)
+
+	// Create tabbed controls
+	basicTab := createBasicControls(window)
+	advancedTab := enhancedControls.CreateAdvancedControls()
+	positionTab := enhancedControls.CreatePositionControls()
+	outputTab := enhancedControls.CreateOutputControls()
+
+	// Wrap each tab in a scroll container
+	basicScroll := container.NewScroll(basicTab)
+	advancedScroll := container.NewScroll(advancedTab)
+	positionScroll := container.NewScroll(positionTab)
+	outputScroll := container.NewScroll(outputTab)
+
+	controlsTabs := container.NewAppTabs(
+		container.NewTabItem("Basic Settings", basicScroll),
+		container.NewTabItem("Advanced Settings", advancedScroll),
+		container.NewTabItem("Position Settings", positionScroll),
+		container.NewTabItem("Output Settings", outputScroll),
+	)
+
+	// Main split container
+	mainSplit := container.NewHSplit(
+		container.NewBorder(nil, nil, nil, nil, leftPanel),
+		container.NewHSplit(
+			previewContainer,
+			controlsTabs,
+		),
+	)
+	mainSplit.SetOffset(0.1)  // Left panel 20%
+	mainSplit.SetOffset(0.65) // Right panel 35%, Preview gets 45% (balanced)
+
+	return mainSplit
+}
+
+func createBasicControls(window fyne.Window) *fyne.Container {
+	// Watermark type selection
+	watermarkType := widget.NewRadioGroup([]string{"Text Watermark", "Image Watermark"}, func(value string) {
+		appData.Watermark.IsImage = value == "Image Watermark"
+		updatePreview()
+	})
+	watermarkType.SetSelected("Text Watermark")
+
+	// Text watermark controls
+	textEntry := widget.NewEntry()
+	textEntry.SetText(appData.Watermark.Text)
+	textEntry.OnChanged = func(text string) {
+		appData.Watermark.Text = text
+		updatePreview()
 	}
 
-	// 遍历目录中的文件
-	currentFile := 0
-	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			logError("访问文件失败 %s: %v", path, err)
-			return err
-		}
+	fontSizeSlider := widget.NewSlider(13, 200) // Much larger font size range
+	fontSizeSlider.Value = float64(appData.Watermark.FontSize)
+	fontSizeSlider.OnChanged = func(value float64) {
+		appData.Watermark.FontSize = int(value)
+		updatePreview()
+	}
 
-		// 跳过目录
-		if info.IsDir() {
-			return nil
-		}
+	opacitySlider := widget.NewSlider(0, 100)
+	opacitySlider.Value = float64(appData.Watermark.Opacity)
+	opacitySlider.OnChanged = func(value float64) {
+		appData.Watermark.Opacity = int(value)
+		updatePreview()
+	}
 
-		// 检查是否为支持的图片格式
-		if isImageFile(path) {
-			currentFile++
-			logProgress(config, currentFile, imageCount, filepath.Base(path))
-			processFile(path, config)
-		}
+	// Position selection
+	positionGroup := widget.NewRadioGroup([]string{
+		"top-left", "top-center", "top-right",
+		"center-left", "center", "center-right",
+		"bottom-left", "bottom-center", "bottom-right",
+	}, func(value string) {
+		appData.Watermark.Position = value
+		updatePreview()
+	})
+	positionGroup.SetSelected(appData.Watermark.Position)
 
-		return nil
+	// Image watermark controls
+	imageSelectBtn := widget.NewButton("Select Image Watermark", func() {
+		selectWatermarkImage(window)
 	})
 
-	if err != nil {
-		logError("遍历目录失败: %v", err)
-		os.Exit(1)
+	// Output settings
+	outputFormat := widget.NewSelect([]string{"JPEG", "PNG"}, func(value string) {
+		appData.OutputFormat = value
+	})
+	outputFormat.SetSelected(appData.OutputFormat)
+
+	qualitySlider := widget.NewSlider(1, 100)
+	qualitySlider.Value = float64(appData.OutputQuality)
+	qualitySlider.OnChanged = func(value float64) {
+		appData.OutputQuality = int(value)
 	}
 
-	logSuccess("目录处理完成！输出目录: %s", outputDir)
+	prefixEntry := widget.NewEntry()
+	prefixEntry.SetText(appData.Prefix)
+	prefixEntry.OnChanged = func(text string) {
+		appData.Prefix = text
+	}
+
+	suffixEntry := widget.NewEntry()
+	suffixEntry.SetText(appData.Suffix)
+	suffixEntry.OnChanged = func(text string) {
+		appData.Suffix = text
+	}
+
+	// Export button
+	exportBtn := widget.NewButton("Export Images", func() {
+		exportImages(window)
+	})
+
+	// Controls layout
+	controls := container.NewVBox(
+		widget.NewLabel("Watermark Settings"),
+		widget.NewLabel("Type:"),
+		watermarkType,
+		widget.NewSeparator(),
+
+		widget.NewLabel("Text Content:"),
+		textEntry,
+		widget.NewLabel("Font Size:"),
+		fontSizeSlider,
+		widget.NewLabel("Opacity:"),
+		opacitySlider,
+		widget.NewSeparator(),
+
+		widget.NewLabel("Position:"),
+		positionGroup,
+		widget.NewSeparator(),
+
+		widget.NewLabel("Image Watermark:"),
+		imageSelectBtn,
+		widget.NewSeparator(),
+
+		widget.NewLabel("Output Settings"),
+		widget.NewLabel("Format:"),
+		outputFormat,
+		widget.NewLabel("Quality:"),
+		qualitySlider,
+		widget.NewLabel("Prefix:"),
+		prefixEntry,
+		widget.NewLabel("Suffix:"),
+		suffixEntry,
+		widget.NewSeparator(),
+
+		exportBtn,
+	)
+
+	return controls
 }
 
-// processFile 处理单个图片文件
-func processFile(inputPath string, config *WatermarkConfig) {
-	stats.ProcessedFiles++
-	logVerbose(config, "开始处理文件: %s", filepath.Base(inputPath))
-
-	// 读取图片
-	img, err := imaging.Open(inputPath)
-	if err != nil {
-		logError("读取图片失败 %s: %v", inputPath, err)
-		stats.FailedFiles++
-		return
-	}
-
-	// 获取EXIF信息
-	watermarkText := getExifDate(inputPath)
-	if watermarkText == "" {
-		watermarkText = time.Now().Format("2006-01-02")
-		logWarning("未找到EXIF日期信息，使用当前日期: %s", watermarkText)
-	} else {
-		logVerbose(config, "从EXIF获取日期: %s", watermarkText)
-	}
-
-	// 添加水印
-	watermarkedImg := addWatermark(img, watermarkText, config)
-
-	// 生成输出路径
-	outputPath := generateOutputPath(inputPath)
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
-		logError("创建输出目录失败: %v", err)
-		stats.FailedFiles++
-		return
-	}
-
-	// 保存图片
-	if err := saveImage(watermarkedImg, outputPath); err != nil {
-		logError("保存图片失败 %s: %v", outputPath, err)
-		stats.FailedFiles++
-		return
-	}
-
-	stats.SuccessFiles++
-	logVerbose(config, "成功保存: %s", filepath.Base(outputPath))
-}
-
-// getExifDate 从EXIF信息中获取拍摄日期
-func getExifDate(imagePath string) string {
-	file, err := os.Open(imagePath)
-	if err != nil {
-		return ""
-	}
-	defer file.Close()
-
-	// 注册相机厂商的EXIF解析器
-	exif.RegisterParsers(mknote.All...)
-
-	x, err := exif.Decode(file)
-	if err != nil {
-		return ""
-	}
-
-	// 尝试获取拍摄时间
-	tm, err := x.DateTime()
-	if err != nil {
-		// 如果DateTime失败，尝试获取原始日期时间
-		dateTime, err := x.Get(exif.DateTime)
+func importSingleImage(window fyne.Window) {
+	dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
 		if err != nil {
-			return ""
+			dialog.ShowError(err, window)
+			return
 		}
-		dateTimeStr := dateTime.String()
-		if len(dateTimeStr) >= 10 {
-			return dateTimeStr[:10] // 返回 YYYY:MM:DD 格式
+		if reader == nil {
+			return
 		}
-		return ""
-	}
+		defer reader.Close()
 
-	return tm.Format("2006-01-02")
+		path := reader.URI().Path()
+		if isValidImageFormat(path) {
+			appData.Images = append(appData.Images, path)
+			updatePreview()
+		} else {
+			dialog.ShowError(errors.New("Unsupported format: Please select JPEG, PNG, BMP or TIFF images"), window)
+		}
+	}, window)
 }
 
-// addWatermark 在图片上添加水印
-func addWatermark(img image.Image, text string, config *WatermarkConfig) image.Image {
-	// 创建RGBA图像
-	bounds := img.Bounds()
-	rgba := image.NewRGBA(bounds)
-	draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
+func importFolder(window fyne.Window) {
+	dialog.ShowFolderOpen(func(list fyne.ListableURI, err error) {
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		if list == nil {
+			return
+		}
 
-	// 获取颜色
-	textColor := getColor(config.Color)
+		// Get all image files from the folder
+		files, err := list.List()
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
 
-	// 获取位置
-	pos := getPosition(config.Position)
-
-	// 绘制文本
-	drawText(rgba, text, textColor, pos, config.FontSize, bounds)
-
-	return rgba
+		for _, file := range files {
+			if isValidImageFormat(file.Path()) {
+				appData.Images = append(appData.Images, file.Path())
+			}
+		}
+		updatePreview()
+	}, window)
 }
 
-// getColor 根据字符串获取颜色
-func getColor(colorStr string) color.RGBA {
-	switch strings.ToLower(colorStr) {
-	case "black":
-		return color.RGBA{0, 0, 0, 255}
-	case "red":
-		return color.RGBA{255, 0, 0, 255}
-	case "blue":
-		return color.RGBA{0, 0, 255, 255}
-	case "green":
-		return color.RGBA{0, 255, 0, 255}
-	case "white":
-		fallthrough
-	default:
-		return color.RGBA{255, 255, 255, 255}
-	}
+func selectWatermarkImage(window fyne.Window) {
+	dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		if reader == nil {
+			return
+		}
+		defer reader.Close()
+
+		path := reader.URI().Path()
+		if isValidImageFormat(path) {
+			appData.Watermark.ImagePath = path
+			appData.Watermark.IsImage = true
+			updatePreview()
+		} else {
+			dialog.ShowError(errors.New("Unsupported format: Please select a valid image format"), window)
+		}
+	}, window)
 }
 
-// getPosition 根据字符串获取位置
-func getPosition(posStr string) Position {
-	if pos, exists := positionMap[strings.ToLower(posStr)]; exists {
-		return pos
-	}
-	return BottomRight // 默认右下角
-}
-
-// drawText 在图像上绘制文本
-func drawText(img *image.RGBA, text string, textColor color.RGBA, pos Position, fontSize int, bounds image.Rectangle) {
-	// 使用基本字体
-	face := basicfont.Face7x13
-
-	// 计算文本尺寸
-	textWidth := len(text) * 7 // 基本字体每个字符约7像素宽
-	textHeight := 13           // 基本字体高度
-
-	// 计算位置
-	var x, y int
-	switch pos {
-	case TopLeft:
-		x = 10
-		y = 10 + textHeight
-	case TopRight:
-		x = bounds.Dx() - textWidth - 10
-		y = 10 + textHeight
-	case BottomLeft:
-		x = 10
-		y = bounds.Dy() - 10
-	case BottomRight:
-		x = bounds.Dx() - textWidth - 10
-		y = bounds.Dy() - 10
-	case Center:
-		x = (bounds.Dx() - textWidth) / 2
-		y = (bounds.Dy() + textHeight) / 2
-	}
-
-	// 绘制文本
-	point := fixed.Point26_6{
-		X: fixed.Int26_6(x * 64),
-		Y: fixed.Int26_6(y * 64),
-	}
-
-	d := &font.Drawer{
-		Dst:  img,
-		Src:  image.NewUniform(textColor),
-		Face: face,
-		Dot:  point,
-	}
-	d.DrawString(text)
-}
-
-// isImageFile 检查文件是否为支持的图片格式
-func isImageFile(filename string) bool {
+func isValidImageFormat(filename string) bool {
 	ext := strings.ToLower(filepath.Ext(filename))
-	return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp" || ext == ".gif"
+	return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp" || ext == ".tiff" || ext == ".tif"
 }
 
-// generateOutputPath 生成输出文件路径
-func generateOutputPath(inputPath string) string {
-	dir := filepath.Dir(inputPath)
-	filename := filepath.Base(inputPath)
-	ext := filepath.Ext(filename)
-	name := strings.TrimSuffix(filename, ext)
+// Global preview widget reference
+var globalPreviewWidget *PreviewWidget
 
-	// 创建输出目录
-	outputDir := filepath.Join(dir, dir+"_watermark")
-
-	// 生成输出文件名
-	outputFilename := name + "_watermark" + ext
-	return filepath.Join(outputDir, outputFilename)
+func updatePreview() {
+	// This function will be called when watermark settings change
+	if globalPreviewWidget != nil {
+		globalPreviewWidget.UpdatePreview()
+	}
 }
 
-// saveImage 保存图片到文件
-func saveImage(img image.Image, outputPath string) error {
-	file, err := os.Create(outputPath)
+func exportImages(window fyne.Window) {
+	if len(appData.Images) == 0 {
+		dialog.ShowInformation("Info", "Please import images first", window)
+		return
+	}
+
+	dialog.ShowFolderOpen(func(list fyne.ListableURI, err error) {
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		if list == nil {
+			return
+		}
+
+		appData.OutputFolder = list.Path()
+
+		// Process each image
+		for i, imagePath := range appData.Images {
+			err := processImage(imagePath, i)
+			if err != nil {
+				dialog.ShowError(errors.New("Processing failed: "+err.Error()), window)
+				return
+			}
+		}
+
+		dialog.ShowInformation("Complete", "All images have been exported successfully", window)
+	}, window)
+}
+
+func processImage(inputPath string, index int) error {
+	// Load the original image
+	img, err := imaging.Open(inputPath)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
-	ext := strings.ToLower(filepath.Ext(outputPath))
-	switch ext {
-	case ".jpg", ".jpeg":
-		return jpeg.Encode(file, img, &jpeg.Options{Quality: 95})
-	case ".png":
-		return png.Encode(file, img)
-	default:
-		return jpeg.Encode(file, img, &jpeg.Options{Quality: 95})
+	// Apply watermark
+	watermarkedImg := applyWatermark(img)
+
+	// Generate output filename
+	baseName := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+	ext := ".jpg"
+	if appData.OutputFormat == "PNG" {
+		ext = ".png"
 	}
+	outputName := appData.Prefix + baseName + appData.Suffix + ext
+	outputPath := filepath.Join(appData.OutputFolder, outputName)
+
+	// Save the image
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer outputFile.Close()
+
+	if appData.OutputFormat == "PNG" {
+		err = png.Encode(outputFile, watermarkedImg)
+	} else {
+		err = jpeg.Encode(outputFile, watermarkedImg, &jpeg.Options{Quality: appData.OutputQuality})
+	}
+
+	return err
 }
